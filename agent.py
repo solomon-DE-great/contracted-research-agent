@@ -1,9 +1,5 @@
-"""
+﻿"""
 Verifiable Research Agent – zero-cost core.
-
-Uses Groq free tier + strict Pydantic contracts.
-Designed so the same structure can later be migrated to full SymbolicAI
-Expression + @contract decorators.
 """
 
 from __future__ import annotations
@@ -11,7 +7,6 @@ import json
 import os
 from typing import Optional, Tuple
 from groq import Groq
-from tenacity import retry, stop_after_attempt, wait_exponential
 from contracts import (
     ResearchQuestion,
     Claim,
@@ -21,42 +16,41 @@ from contracts import (
     ProvenanceTrace,
 )
 
-# Default free-tier friendly model
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+# Safer default model with higher free-tier limits
+DEFAULT_MODEL = "llama-3.1-8b-instant"
 
 
 def get_client() -> Groq:
     key = os.getenv("GROQ_API_KEY")
     if not key:
         raise RuntimeError(
-            "GROQ_API_KEY not set. Get a free key at https://console.groq.com "
-            "(no credit card required) and put it in .env or Streamlit secrets."
+            "GROQ_API_KEY not set. Add it in Streamlit Secrets."
         )
     return Groq(api_key=key)
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def call_llm(system: str, user: str, model: str = DEFAULT_MODEL, temperature: float = 0.2) -> str:
     client = get_client()
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=temperature,
-        max_tokens=4096,
-        response_format={"type": "json_object"},
-    )
-    return resp.choices[0].message.content or "{}"
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=temperature,
+            max_tokens=4096,
+            response_format={"type": "json_object"},
+        )
+        return resp.choices[0].message.content or "{}"
+    except Exception as e:
+        # Show the real Groq error instead of a RetryError
+        raise RuntimeError(f"Groq API error: {type(e).__name__}: {str(e)}") from e
 
 
 SYSTEM_PROMPT = """You are a rigorous research assistant that follows Design-by-Contract principles.
-You NEVER invent citations. Every factual claim MUST be backed by a plausible, real-looking source
-(prefer real DOIs, arXiv IDs, or well-known review papers when possible; if uncertain mark confidence low).
-
+You NEVER invent citations. Every factual claim MUST be backed by a plausible source.
 You always answer in valid JSON that matches the requested schema exactly.
-If you cannot find enough evidence, say so honestly in the limitations and lower confidence.
 """
 
 
@@ -66,31 +60,24 @@ def generate_verified_report(
     constraints: Optional[str] = None,
     model: str = DEFAULT_MODEL,
 ) -> Tuple[VerifiedReport, list[str]]:
-    """
-    Main entry point.
-    Returns a fully validated VerifiedReport + list of intermediate log steps.
-    Raises if final contract validation fails (after retries).
-    """
     rq = ResearchQuestion(question=question, domain=domain, constraints=constraints)
     steps: list[str] = []
     steps.append(f"Input contract accepted: {rq.question[:80]}...")
 
-    # Step 1 – Plan the research structure
     plan_prompt = f"""Research question: {rq.question}
 Domain: {rq.domain or "general"}
 Constraints: {rq.constraints or "none"}
 
 Produce a JSON object with:
 {{
-  "sections": ["section title 1", "section title 2", ...],  // 2-5 focused sections
-  "search_strategy": "brief description of how you will ground claims"
+  "sections": ["section title 1", "section title 2"],
+  "search_strategy": "brief description"
 }}
 """
     plan_raw = call_llm(SYSTEM_PROMPT, plan_prompt, model=model)
     plan = json.loads(plan_raw)
     steps.append(f"Research plan created: {len(plan.get('sections', []))} sections")
 
-    # Step 2 – Generate claims with forced provenance
     claims_prompt = f"""Research question: {rq.question}
 Domain: {rq.domain or "general"}
 Constraints: {rq.constraints or "prefer recent peer-reviewed sources"}
@@ -110,30 +97,28 @@ Generate a JSON object:
           "caveats": "optional",
           "sources": [
             {{
-              "title": "real or realistic paper/page title",
-              "url_or_id": "DOI / arXiv / URL / ISBN",
+              "title": "paper or page title",
+              "url_or_id": "DOI / arXiv / URL",
               "year": 2023,
-              "note": "optional relevance note"
+              "note": "optional"
             }}
           ]
         }}
       ]
     }}
   ],
-  "limitations": "honest statement of gaps, possible biases, and what was not covered"
+  "limitations": "honest statement of gaps"
 }}
 
 Rules:
 - Every claim MUST have at least one source.
-- Prefer real known papers when you know them; otherwise use realistic identifiers and mark confidence low.
-- Do not invent precise page numbers or fabricated DOIs that look real if you are unsure.
-- Keep total claims between 4 and 12.
+- Prefer real known papers when possible; otherwise use realistic identifiers and mark confidence low.
+- Keep total claims between 4 and 10.
 """
     raw = call_llm(SYSTEM_PROMPT, claims_prompt, model=model, temperature=0.3)
     data = json.loads(raw)
     steps.append("Raw claims generated by LLM")
 
-    # Step 3 – Build and validate under contract
     all_claims: list[Claim] = []
     sections: list[ReportSection] = []
 
@@ -170,10 +155,9 @@ Rules:
         sections=sections,
         all_claims=all_claims,
         provenance=provenance,
-        limitations=data.get("limitations", "Limitations not fully specified by model."),
+        limitations=data.get("limitations", "Limitations not fully specified."),
     )
 
-    # Final contract gate
     report.provenance.contract_checks_passed = True
     report.provenance.steps.append("All Design-by-Contract checks passed")
     steps.append("VerifiedReport contract satisfied")
