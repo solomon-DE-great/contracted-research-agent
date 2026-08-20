@@ -16,20 +16,28 @@ from contracts import (
     ProvenanceTrace,
 )
 
-# Safer default model with higher free-tier limits
+# Only use models that are confirmed available on free tier
 DEFAULT_MODEL = "llama-3.1-8b-instant"
 
 
 def get_client() -> Groq:
     key = os.getenv("GROQ_API_KEY")
     if not key:
-        raise RuntimeError(
-            "GROQ_API_KEY not set. Add it in Streamlit Secrets."
-        )
+        raise RuntimeError("GROQ_API_KEY not set. Add it in Streamlit Secrets.")
     return Groq(api_key=key)
 
 
 def call_llm(system: str, user: str, model: str = DEFAULT_MODEL, temperature: float = 0.2) -> str:
+    # Force a safe model no matter what the UI sends
+    safe_models = {
+        "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",
+        "qwen/qwen3-32b",
+        "moonshotai/kimi-k2-instruct",
+    }
+    if model not in safe_models:
+        model = DEFAULT_MODEL
+
     client = get_client()
     try:
         resp = client.chat.completions.create(
@@ -44,7 +52,6 @@ def call_llm(system: str, user: str, model: str = DEFAULT_MODEL, temperature: fl
         )
         return resp.choices[0].message.content or "{}"
     except Exception as e:
-        # Show the real Groq error instead of a RetryError
         raise RuntimeError(f"Groq API error: {type(e).__name__}: {str(e)}") from e
 
 
